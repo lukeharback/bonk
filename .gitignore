@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# Xcode build products and per-user state
+build/
+DerivedData/
+*.xcuserstate
+*.xcscmblueprint
+xcuserdata/
+
+# Swift Package Manager artifacts
+.build/
+.swiftpm/
+
+# Local signing configuration (never commit)
+Config/Signing.xcconfig
