@@ -22,37 +22,90 @@ private final class WindowMover {
             return
         }
 
-        guard let frontmostApp = NSWorkspace.shared.frontmostApplication else { return }
-        let appElement = AXUIElementCreateApplication(frontmostApp.processIdentifier)
+        guard let window = focusedWindow(), var frame = frame(of: window) else { return }
+        frame.origin.x += x
+        frame.origin.y += y
+        setPosition(frame.origin, for: window)
+    }
 
+    func featureFocusedWindow() {
+        guard AXIsProcessTrusted() else {
+            NSSound.beep()
+            return
+        }
+
+        guard let window = focusedWindow(), let currentFrame = frame(of: window) else { return }
+        guard let screen = screen(containing: currentFrame) else { return }
+
+        let usableFrame = screen.visibleFrame
+        let targetSize = CGSize(
+            width: usableFrame.width * 0.70,
+            height: usableFrame.height * 0.78
+        )
+        let targetFrame = NSRect(
+            x: usableFrame.midX - targetSize.width / 2,
+            y: usableFrame.midY - targetSize.height / 2,
+            width: targetSize.width,
+            height: targetSize.height
+        )
+
+        setSize(targetSize, for: window)
+        setPosition(axPosition(for: targetFrame), for: window)
+    }
+
+    private func focusedWindow() -> AXUIElement? {
+        guard let frontmostApp = NSWorkspace.shared.frontmostApplication else { return nil }
+        let appElement = AXUIElementCreateApplication(frontmostApp.processIdentifier)
         var focusedWindow: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             appElement,
             kAXFocusedWindowAttribute as CFString,
             &focusedWindow
-        ) == .success, let window = focusedWindow else { return }
+        ) == .success, let focusedWindow else { return nil }
+        return (focusedWindow as! AXUIElement)
+    }
 
-        let windowElement = window as! AXUIElement
-        var positionValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            windowElement,
-            kAXPositionAttribute as CFString,
-            &positionValue
-        ) == .success, let positionValue else { return }
-        let axPosition = positionValue as! AXValue
-
+    private func frame(of window: AXUIElement) -> CGRect? {
+        guard let positionValue = axValue(for: kAXPositionAttribute as CFString, window: window),
+              let sizeValue = axValue(for: kAXSizeAttribute as CFString, window: window) else { return nil }
         var position = CGPoint.zero
-        guard AXValueGetValue(axPosition, .cgPoint, &position) else { return }
+        var size = CGSize.zero
+        guard AXValueGetValue(positionValue, .cgPoint, &position),
+              AXValueGetValue(sizeValue, .cgSize, &size) else { return nil }
+        return CGRect(origin: position, size: size)
+    }
 
-        position.x += x
-        position.y += y
-        guard let newPosition = AXValueCreate(.cgPoint, &position) else { return }
+    private func axValue(for attribute: CFString, window: AXUIElement) -> AXValue? {
+        var rawValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, attribute, &rawValue) == .success,
+              let rawValue else { return nil }
+        return (rawValue as! AXValue)
+    }
 
-        AXUIElementSetAttributeValue(
-            windowElement,
-            kAXPositionAttribute as CFString,
-            newPosition
-        )
+    private func setPosition(_ position: CGPoint, for window: AXUIElement) {
+        var position = position
+        guard let value = AXValueCreate(.cgPoint, &position) else { return }
+        AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value)
+    }
+
+    private func setSize(_ size: CGSize, for window: AXUIElement) {
+        var size = size
+        guard let value = AXValueCreate(.cgSize, &size) else { return }
+        AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, value)
+    }
+
+    private func screen(containing axFrame: CGRect) -> NSScreen? {
+        let axCenter = CGPoint(x: axFrame.midX, y: axFrame.midY)
+        let appKitCenter = CGPoint(x: axCenter.x, y: desktopMaximumY - axCenter.y)
+        return NSScreen.screens.first(where: { $0.frame.contains(appKitCenter) }) ?? NSScreen.main
+    }
+
+    private func axPosition(for appKitFrame: CGRect) -> CGPoint {
+        CGPoint(x: appKitFrame.minX, y: desktopMaximumY - appKitFrame.maxY)
+    }
+
+    private var desktopMaximumY: CGFloat {
+        NSScreen.screens.map(\.frame.maxY).max() ?? 0
     }
 }
 
@@ -62,6 +115,7 @@ private final class HotKeyController {
     private enum Identifier: UInt32 {
         case left = 1, right, down, up
         case largeLeft, largeRight, largeDown, largeUp
+        case feature
     }
 
     private var hotKeys: [EventHotKeyRef?] = []
@@ -91,6 +145,7 @@ private final class HotKeyController {
             modifiers: UInt32(controlKey | optionKey | cmdKey | shiftKey),
             identifiers: [.largeLeft, .largeRight, .largeDown, .largeUp]
         )
+        registerFeatureHotKey()
     }
 
     func handle(identifier: UInt32) {
@@ -104,6 +159,7 @@ private final class HotKeyController {
         case .largeRight: WindowMover.shared.moveFocusedWindow(x: Nudge.large, y: 0)
         case .largeDown: WindowMover.shared.moveFocusedWindow(x: 0, y: Nudge.large)
         case .largeUp: WindowMover.shared.moveFocusedWindow(x: 0, y: -Nudge.large)
+        case .feature: WindowMover.shared.featureFocusedWindow()
         }
     }
 
@@ -122,6 +178,19 @@ private final class HotKeyController {
             )
             if result == noErr { hotKeys.append(ref) }
         }
+    }
+
+    private func registerFeatureHotKey() {
+        var ref: EventHotKeyRef?
+        let result = RegisterEventHotKey(
+            49, // Space
+            UInt32(controlKey | optionKey | cmdKey),
+            EventHotKeyID(signature: signature, id: Identifier.feature.rawValue),
+            GetApplicationEventTarget(),
+            0,
+            &ref
+        )
+        if result == noErr { hotKeys.append(ref) }
     }
 }
 
@@ -164,6 +233,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.addItem(withTitle: "Move: ⌃⌥⌘ Arrow", action: nil, keyEquivalent: "")
         menu.addItem(withTitle: "Move large: ⌃⌥⇧⌘ Arrow", action: nil, keyEquivalent: "")
+        let featureWindowItem = menu.addItem(
+            withTitle: "Feature window: ⌃⌥⌘ Space",
+            action: #selector(featureWindow),
+            keyEquivalent: ""
+        )
+        featureWindowItem.target = self
         largeNudgeMenuItem = NSMenuItem(title: largeNudgeMenuTitle, action: nil, keyEquivalent: "")
         largeNudgeMenuItem.submenu = makeLargeNudgeMenu()
         menu.addItem(largeNudgeMenuItem)
@@ -176,6 +251,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openAccessibility() {
         requestAccessibilityIfNeeded()
+    }
+
+    @objc private func featureWindow() {
+        WindowMover.shared.featureFocusedWindow()
     }
 
     private func makeLargeNudgeMenu() -> NSMenu {
