@@ -1,0 +1,5 @@
+// Shared build settings. Per-developer identity values live in Signing.xcconfig,
+// which is deliberately ignored by Git.
+CODE_SIGN_STYLE = Automatic
+PRODUCT_BUNDLE_IDENTIFIER = com.example.bonk
+#include? "Signing.xcconfig"
